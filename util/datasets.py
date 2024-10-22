@@ -12,7 +12,7 @@ import os
 import PIL
 
 from torchvision import datasets, transforms
-
+from tqdm import tqdm
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
@@ -63,3 +63,16 @@ def build_transform(is_train, args):
     t.append(transforms.ToTensor())
     t.append(transforms.Normalize(mean, std))
     return transforms.Compose(t)
+
+
+def create_link_image(train_folder):
+    '''
+        Create link image for training and validation dataset
+    '''
+    file_links = {}
+    # Create link file for training dataset
+    for each_folder in train_folder:
+        for each_image in tqdm(os.listdir(each_folder), desc="Create link image", unit="image", leave=False):
+            file_links[each_image] = os.path.join(each_folder, each_image)
+
+    return file_links
