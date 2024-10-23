@@ -5,14 +5,14 @@ import numpy as np
 import os
 import time
 import timm
-assert timm.__version__ == "0.3.2"  # version check
+# assert timm.__version__ == "0.3.2"  # version check
 import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 import timm.optim.optim_factory as optim_factory
 import util.misc as misc
 import timm.models.layers.helpers
-import models_mae_update as models_mae
+import models_mae as models_mae
 
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from pathlib import Path
@@ -48,8 +48,8 @@ def get_args_parser():
     parser.add_argument('--image_folder', type=str, nargs='+', help='path to image folder')
     parser.add_argument('--do_train', action="store_true", help='do train')
     parser.add_argument('--do_eval', action="store_true", help='do eval')
-    parser.add_argument('--max_train_samples', type=int, default=None, help='max train samples')
-    parser.add_argument('--max_val_samples', type=int, default=None, help='max val samples')
+    parser.add_argument('--max_train_samples', type=int, default=-1, help='max train samples')
+    parser.add_argument('--max_val_samples', type=int, default=-1, help='max val samples')
     parser.add_argument('--num_proc', type=int, default=8, help='num proc')
     parser.add_argument('--streaming', type=bool, default=False, help='streaming')
     parser.add_argument('--mask_ratio', type=float, default=0.75, help='mask config')
@@ -78,7 +78,9 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 
     # Finetune params
-    parser.add_argument('--uptrain', default=None, help='load model from checkpoint')
+    parser.add_argument('--weights', default=None, help='load model from checkpoint')
+    parser.add_argument('--mask_mode', type=str, default='rand', help='define mask strategies')
+    
     return parser
 
 def main(args):
@@ -105,28 +107,21 @@ def main(args):
         log_writer = None
     
     # Define the model
-    model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
-    if args.uptrain is not None and os.path.isfile(args.uptrain):
-        checkpoint = torch.load(args.uptrain, map_location='cpu')
-        
-        print("Load pre-trained checkpoint from: %s" % args.uptrain)
-        checkpoint_model = checkpoint['model']
-        state_dict = model.state_dict()
-        for k in ['head.weight', 'head.bias']:
-            if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
-
-        # interpolate position embedding
-        interpolate_pos_embed(model, checkpoint_model)
-
-        # load pre-trained model
-        msg = model.load_state_dict(checkpoint_model, strict=False)
-        print(msg)
-    else:
-        print("No pre-trained model loaded")
-    model.to(device)
+    model = getattr(models_mae, args.model)()
     
+    # Update config
+    model.norm_pix_loss = args.norm_pix_loss
+    model.mask_mode= args.mask_mode
+    
+    if os.path.isfile(args.weights):
+        # load model
+        checkpoint = torch.load(args.weights, map_location='cpu')
+        msg = model.load_state_dict(checkpoint['model'], strict=False)
+        print(f"\n\nLoad model from: {args.weights} {msg} \n\n")
+    else:
+        print("\n\nTraining from scratch . . . \n\n")
+
+    model.to(device)
     model_without_ddp = model
     print("Model = %s" % str(model_without_ddp))
     
@@ -169,8 +164,8 @@ def main(args):
         mask_min=args.mask_min,
         mask_max=args.mask_max,
         cache_dir=args.cache_dir,
-        mean_dataset=[0.485, 0.456, 0.406],
-        std_dataset=[0.229, 0.224, 0.225]
+        mean_dataset=args.mean_dataset,
+        std_dataset=args.std_dataset
     ).process()
     train_dataset = torch.utils.data.DataLoader(dataset['train'], batch_size=args.batch_size, shuffle=True)
     val_dataset = torch.utils.data.DataLoader(dataset['validation'], batch_size=args.batch_size, shuffle=False)

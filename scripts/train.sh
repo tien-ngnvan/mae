@@ -1,25 +1,28 @@
 python train.py \
         --norm_pix_loss \
-        --batch_size 32 \
-        --epochs 3 \
+        --batch_size 256 \
+        --epochs 100 \
         --model mae_vit_base_patch16 \
         --input_size 224 \
-        --warmup_epochs 1 \
-        --dataset_name_train inpaint-context/test \
+        --norm_pix_loss \
+        --weight_decay 0.05 \
+        --blr 1e-3 \
+        --warmup_epochs 5 \
+        --dataset_name_train "inpaint-context/train-mae-update-furniture" \
         --image_folder \
-            /mnt/d/Work/Inpainting/data/data_folder/ade20k \
-            /mnt/d/Work/Inpainting/data/data_folder/pascal-context \
-            /mnt/d/Work/Inpainting/data/data_folder/bnb \
+            "/mnt/Datadrive/tiennv/data/final" \
+            "/mnt/Datadrive/datasets/ade20k/ade20k" \
+            "/mnt/Datadrive/datasets/ade20k/pascal-context" \
+            "/mnt/Datadrive/datasets/coco2017/train" \
+            "/mnt/Datadrive/datasets/coco2017/val" \
         --do_train \
         --do_eval \
-        --max_train_samples 128 \
-        --max_val_samples 32 \
-        --mask_ratio 0.25 \
+        --mask_ratio 0.75 \
         --mask_min 0 \
         --mask_max 1 \
         --cache_dir .cache \
-        --uptrain checkpoints/mae_pretrain_vit_base.pth \
         --output_dir outputs/files \
         --log_dir outputs/logs \
-        --blr 1.5e-4 \
-        --weight_decay 0.05 \
+        --world_size 2 \
+        --weights checkpoints/mae_pretrain_vit_base_full.pth \
+        --mask_mode 'objmask' 

@@ -13,9 +13,9 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-
 from timm.models.vision_transformer import PatchEmbed, Block
 
+from images import SpreadMasking
 from util.pos_embed import get_2d_sincos_pos_embed
 
 
@@ -25,14 +25,16 @@ class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3,
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, 
+                 mask_ratio=0.75, interpolate_ratio=0.8, mask_mode='rand'):
         super().__init__()
 
+        self.spread_masking = SpreadMasking(mask_ratio, interpolate_ratio)
+        self.mask_mode = mask_mode
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
-
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
@@ -119,8 +121,59 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
         return imgs
+    
+    def objmask(self, x, mask_ratio, mask_sequence):
+        sequence_shape = x.shape
+        batch_size, seq_length, dim = sequence_shape
+        if mask_ratio == -1:
+            len_keep = seq_length - mask_sequence.sum(dim=1)[0].int()
+        else:
+            len_keep = int(seq_length * (1 - mask_ratio))
+        
+        mask = mask_sequence.view(batch_size, -1)
+        base = torch.argsort(mask, dim=1)
+        ids_keep = base[:, :len_keep]
+        ids_mask = base[:, len_keep:]
+        
+        # shuffle the mask and non-mask
+        # shuffle the keep
+        noise1 = torch.rand(batch_size, len(ids_keep[0]))
+        # shuffle the mask
+        noise2 = torch.rand(batch_size, len(ids_mask[0]))
+        
+        # get index after shuffle
+        ids_shuffle1 = torch.argsort(noise1, dim=1).to(x.device)
+        ids_shuffle2 = torch.argsort(noise2, dim=1).to(x.device)
+        
+        # get the original index after shuffle
+        ids_restore1 = torch.argsort(ids_shuffle1, dim=1)
+        ids_restore2 = torch.argsort(ids_shuffle2, dim=1)
+        
+        # get the original index
+        ids_keep = ids_keep.gather(1, ids_restore1)
+        ids_mask = ids_mask.gather(1, ids_restore2)
+        
+        # combine the mask and non-mask
+        ids_shuffle = torch.cat((ids_keep, ids_mask), dim=1)
+        
+        # get the original index after shuffle
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+        
+        # get the index forward model
+        ids_keep = ids_shuffle[:, :len_keep]
+        ids_mask = ids_shuffle[:, len_keep:]
+        
+        # get the value of the mask
+        sequence_unmasked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, dim))
+        
+        # calculate the mask
+        mask = torch.ones((batch_size, seq_length), device=x.device)
+        mask[:, :len_keep] = 0
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+        
+        return sequence_unmasked, mask, ids_restore
 
-    def random_masking(self, x, mask_ratio):
+    def randmask(self, x, mask_ratio):
         """
         Perform per-sample random masking by per-sample shuffling.
         Per-sample shuffling is done by argsort random noise.
@@ -146,16 +199,25 @@ class MaskedAutoencoderViT(nn.Module):
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
         return x_masked, mask, ids_restore
-
-    def forward_encoder(self, x, mask_ratio):
+    
+    def random_masking(self, x, mask_ratio, mask_sequence):
+        if self.mask_mode=='rand':
+            return self.randmask(x, mask_ratio)
+        elif self.mask_mode=='objmask' and mask_sequence is not None:
+            return self.objmask(x, mask_ratio, mask_sequence)
+        else:
+            raise NotImplementedError(f'Not support masking {self.mask_mode} with mask_sequence {type(mask_sequence)}')
+        
+    def forward_encoder(self, x, mask_sequence=None, mask_ratio=0.75):
         # embed patches
-        x = self.patch_embed(x)
-
+        x = self.patch_embed(x)            
         # add pos embed w/o cls token
         x = x + self.pos_embed[:, 1:, :]
 
         # masking: length -> length * mask_ratio
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        if mask_sequence is not None:
+            mask_sequence = self.spread_masking.create_masks_batch(mask_sequence)
+        x, mask, ids_restore = self.random_masking(x, mask_ratio, mask_sequence)
 
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
@@ -213,8 +275,8 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward(self, imgs, mask_ratio=0.75):
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+    def forward(self, imgs, masks=None, mask_ratio=0.75):
+        latent, mask, ids_restore = self.forward_encoder(imgs, masks, mask_ratio)
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
         loss = self.forward_loss(imgs, pred, mask)
         return loss, pred, mask
