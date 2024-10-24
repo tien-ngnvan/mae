@@ -12,7 +12,7 @@ import os
 import uuid
 from pathlib import Path
 
-import main_pretrain as trainer
+import train as trainer
 import submitit
 
 
@@ -31,9 +31,9 @@ def parse_args():
 
 
 def get_shared_folder() -> Path:
-    user = os.getenv("USER")
-    if Path("/checkpoint/").is_dir():
-        p = Path(f"/checkpoint/{user}/experiments")
+    cur_file_path = Path("distributed").absolute()
+    if Path("distributed/").is_dir():
+        p = Path(f"{cur_file_path}/experiments")
         p.mkdir(exist_ok=True)
         return p
     raise RuntimeError("No shared folder available")
@@ -42,7 +42,7 @@ def get_shared_folder() -> Path:
 def get_init_file():
     # Init file must not exist, but it's parent dir must exist.
     os.makedirs(str(get_shared_folder()), exist_ok=True)
-    init_file = get_shared_folder() / f"{uuid.uuid4().hex}_init"
+    init_file = (get_shared_folder() / f"{uuid.uuid4().hex}_init").resolve()
     if init_file.exists():
         os.remove(str(init_file))
     return init_file
@@ -53,7 +53,7 @@ class Trainer(object):
         self.args = args
 
     def __call__(self):
-        import main_pretrain as trainer
+        import train as trainer
 
         self._setup_gpu_args()
         trainer.main(self.args)
