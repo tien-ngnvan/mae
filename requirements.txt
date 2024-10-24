@@ -1,0 +1,5 @@
+torch
+torchvision
+timm==0.4.5
+pillow
+# mamba install pytorch torchvision pytorch-cuda=12.4 -c pytorch -c nvidia

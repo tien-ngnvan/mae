@@ -85,13 +85,14 @@ def train_one_epoch(model: torch.nn.Module,
 @torch.no_grad()
 def evaluate(model: torch.nn.Module,
              data_loader: Iterable,
-             device: torch.device,
-             args=None
+             device: torch.device, epoch: int,
+             args=None, log_writer=None
              ):
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = 'Test:'
     print_freq = 1
     
+    accum_iter = args.accum_iter
     
     # Switch to evaluation mode
     model.eval()
@@ -101,9 +102,11 @@ def evaluate(model: torch.nn.Module,
         pixel_values = samples['pixel_values'].to(device, non_blocking=True)
         loss, _, _ = model(pixel_values, pixel_values_mask, mask_ratio=args.mask_ratio)
         loss_value.append(loss.item())
-        metric_logger.update(loss=loss.item())
-        
+
+    loss_value = sum(loss_value) / len(loss_value)
+    if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
+        log_writer.add_scalar('val_loss', misc.all_reduce_mean(loss_value), epoch * 1000)
+    
     metric_logger.synchronize_between_processes()
     print("Averaged evaluation stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-    
