@@ -33,7 +33,7 @@ class SpreadMasking:
 
         if len(binary_tensors.size()) != 4:
             binary_tensors = binary_tensors.unsqueeze(0)
-        self.mask_ratio = -1
+        # self.mask_ratio = -1
         if self.mask_ratio == -1:
             return binary_tensors
         else:

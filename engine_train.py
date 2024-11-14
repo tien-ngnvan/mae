@@ -22,7 +22,10 @@ def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
                     log_writer=None,
-                    args=None):
+                    args=None,
+                    mask_mode=None
+                    ):
+    # model.mask_mode = mask_mode
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -37,7 +40,6 @@ def train_one_epoch(model: torch.nn.Module,
         print('log_dir: {}'.format(log_writer.log_dir))
 
     for data_iter_step, samples in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
@@ -46,7 +48,9 @@ def train_one_epoch(model: torch.nn.Module,
         pixel_values = samples['pixel_values'].to(device, non_blocking=True)
 
         with torch.cuda.amp.autocast():
-            loss, _, _ = model(pixel_values, pixel_values_mask, mask_ratio=args.mask_ratio)
+        # with torch.amp.autocast("cuda"):
+            loss, _, _ = model(pixel_values, pixel_values_mask, mask_mode=mask_mode)
+            # loss, _, _ = self(pixel_values, pixel_values_mask, mask_mode=mask_mode)
 
         loss_value = loss.item()
 
@@ -86,7 +90,8 @@ def train_one_epoch(model: torch.nn.Module,
 def evaluate(model: torch.nn.Module,
              data_loader: Iterable,
              device: torch.device, epoch: int,
-             args=None, log_writer=None
+             args=None, log_writer=None,
+             mask_mode=None
              ):
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = 'Test:'
@@ -100,7 +105,8 @@ def evaluate(model: torch.nn.Module,
     for data_iter_step, samples in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         pixel_values_mask = samples['pixel_values_mask'].to(device, non_blocking=True)
         pixel_values = samples['pixel_values'].to(device, non_blocking=True)
-        loss, _, _ = model(pixel_values, pixel_values_mask, mask_ratio=args.mask_ratio)
+        # loss, _, _ = model(pixel_values, pixel_values_mask, mask_ratio=args.mask_ratio)
+        loss, _, _ = model(pixel_values, pixel_values_mask, mask_mode=mask_mode)
         loss_value.append(loss.item())
 
     loss_value = sum(loss_value) / len(loss_value)

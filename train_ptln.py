@@ -20,6 +20,26 @@ from util.pos_embed import interpolate_pos_embed
 from engine_train import train_one_epoch, evaluate
 from data import MAEDataset
 
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch import Trainer
+
+
+import logging
+
+from model_ptln import LitMAE
+from lightning.pytorch.loggers import WandbLogger
+
+
+logger = logging.getLogger(__name__)
+os.system("wandb login --relogin 138c38699b36fb0223ca0f94cde30c6d531895ca")
+# wandb.init(project="mae_training", sync_tensorboard=True)
+# wandb.init(project="mae_training")
+wandb_logger = WandbLogger(
+    project="mae_training",
+    log_model="all",
+)
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
     # Training parameters
@@ -63,6 +83,7 @@ def get_args_parser():
     parser.add_argument('--output_dir', default='./output_dir', help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir', help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda', help='device to use for training / testing')
+    parser.add_argument('--devices', type=int, nargs='+', default=0, help='define cuda index use for train')
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
 
@@ -98,6 +119,11 @@ def main(args):
         raise ValueError("dis_mask must sum to 1.0")
     
     # mask_mode_dict = dict(zip(args.mask_mode, args.dis_mask))
+    for i in range(len(args.dis_mask)):
+        if i == 0:
+            continue
+        args.dis_mask[i] += args.dis_mask[i - 1]
+            
     mask_mode_dict = {args.mask_mode[i]: args.dis_mask[i] for i in range(len(args.mask_mode))}
     mask_mode_dict = {k: v*args.epochs for k, v in mask_mode_dict.items()}
     list_mask_mode = []
@@ -139,7 +165,7 @@ def main(args):
     # Update config
     model.norm_pix_loss = args.norm_pix_loss
     # model.mask_mode= args.mask_mode
-    
+    print("args.weights: ", args.weights)
     if os.path.isfile(args.weights):
         # load model
         checkpoint = torch.load(args.weights, map_location='cpu')
@@ -148,9 +174,9 @@ def main(args):
     else:
         print("\n\nTraining from scratch . . . \n\n")
 
-    model.to(device)
-    model_without_ddp = model
-    print("Model = %s" % str(model_without_ddp))
+    # model.to(device)
+    # model_without_ddp = model
+    # print("Model = %s" % str(model_without_ddp))
     
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
     
@@ -163,17 +189,26 @@ def main(args):
     print("accumulate grad iterations: %d" % args.accum_iter)
     print("effective batch size: %d" % eff_batch_size)
     
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-        model_without_ddp = model.module
+    dist = True if len(args.devices) > 1 else False
+
+    litmodel = LitMAE(model, 
+        lr=args.lr, min_lr=args.min_lr, blr=args.blr,
+        weight_decay=args.weight_decay, warmup_epochs=args.warmup_epochs, epochs=args.epochs,
+        mask_mode_dict=mask_mode_dict, list_mask_mode=list_mask_mode,
+        sync_dist=dist, devices=args.devices, accumulate_grad_batches = args.accum_iter,
+    )
+    
+    # if args.distributed:
+    #     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+    #     model_without_ddp = model.module
     
     # Following timm: set wd as 0 for bias and norm layers
-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-    print(optimizer)
-    loss_scaler = NativeScaler()
+    # param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+    # optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    # print(optimizer)
+    # loss_scaler = NativeScaler()
     
-    misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    # misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     # Load the dataset and create dataloader
     dataset = MAEDataset(
@@ -194,70 +229,108 @@ def main(args):
         mean_dataset=[0.46458734, 0.42847479, 0.36597574],
         std_dataset=[0.24277488, 0.2371218 , 0.23851591]
     ).process()
+    
     train_dataset = torch.utils.data.DataLoader(dataset['train'], batch_size=args.batch_size, shuffle=True)
     val_dataset = torch.utils.data.DataLoader(dataset['validation'], batch_size=args.batch_size, shuffle=False)
 
-    # print(f"Start training for {args.epochs} epochs")
-    start_time = time.time()
+    model_checkpoint = ModelCheckpoint(
+        save_top_k=5,
+        monitor="valid/loss",
+        mode="min", dirpath=f"{args.output_dir}/output_ptln",
+        filename="sample-{epoch:03d}-{valid/loss:.2f}",
+        save_weights_only=True
+    )
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+    
+    trainer = Trainer(
+        max_epochs=args.epochs,
+        accelerator="cuda",
+        devices=args.devices,
+        callbacks=[model_checkpoint, lr_monitor],
+        strategy="ddp_find_unused_parameters_true" if dist else "auto",
+        accumulate_grad_batches=args.accum_iter,
+        logger=wandb_logger,
+        log_every_n_steps=10,
+    )
+
     if args.do_train:
-        mask_strategy = 0
-        # mask_mode_tensor = torch.tensor(mask_strategy, dtype=torch.int32).to(device)
-        # torch.distributed.broadcast(mask_mode_tensor, src=0)
-        # mask_strategy = mask_mode_tensor.item()
-        print(f"Epoch 0 mask strategy: {args.mask_mode[mask_strategy]}")
-        for epoch in range(args.start_epoch, args.epochs):
-            if mask_strategy < len(list_mask_mode) - 1 and epoch > mask_mode_dict[list_mask_mode[mask_strategy]]:
-                mask_strategy += 1
-                # mask_mode_tensor = torch.tensor(mask_strategy, dtype=torch.int32).to(device)
-                # torch.distributed.broadcast(mask_mode_tensor, src=0)
-                # mask_strategy = mask_mode_tensor.item()
-                # torch.distributed.barrier()
-            print(f"Epoch {epoch} mask strategy: {args.mask_mode[mask_strategy]}")
-            train_stats = train_one_epoch(
-                model, train_dataset,
-                optimizer, device, epoch, loss_scaler,
-                log_writer=log_writer,
-                args=args,
-                mask_mode=args.mask_mode[mask_strategy]
-            )
-            # torch.distributed.barrier()
-            if args.output_dir and (epoch % 5 == 0 or epoch + 1 == args.epochs) and misc.is_main_process():
-                misc.save_model(
-                    args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                    loss_scaler=loss_scaler, epoch=epoch)
+        logger.info("*** Start training ***")
+        trainer.fit(
+            model=litmodel,
+            train_dataloaders=train_dataset,
+            val_dataloaders=val_dataset if args.do_eval else None
+        )
+        
+        saved_ckpt_path = f"{args.output_dir}/checkpoint"
+        
+        os.makedirs(saved_ckpt_path, exist_ok=True)
+        saved_ckpt_path = f"{saved_ckpt_path}/best.pt"
+        trainer.save_checkpoint(saved_ckpt_path)
+        
+    if args.do_eval:
+        logger.info("\n\n*** Evaluate ***")
+        trainer.devices = 0
+        trainer.test(litmodel, dataloaders=val_dataset, ckpt_path="best")
+    # print(f"Start training for {args.epochs} epochs")
+    # start_time = time.time()
+    # if args.do_train:
+    #     mask_strategy = 0
+    #     # mask_mode_tensor = torch.tensor(mask_strategy, dtype=torch.int32).to(device)
+    #     # torch.distributed.broadcast(mask_mode_tensor, src=0)
+    #     # mask_strategy = mask_mode_tensor.item()
+    #     print(f"Epoch 0 mask strategy: {args.mask_mode[mask_strategy]}")
+    #     for epoch in range(args.start_epoch, args.epochs):
+    #         if mask_strategy < len(list_mask_mode) - 1 and epoch > mask_mode_dict[list_mask_mode[mask_strategy]]:
+    #             mask_strategy += 1
+    #             # mask_mode_tensor = torch.tensor(mask_strategy, dtype=torch.int32).to(device)
+    #             # torch.distributed.broadcast(mask_mode_tensor, src=0)
+    #             # mask_strategy = mask_mode_tensor.item()
+    #             # torch.distributed.barrier()
+    #         print(f"Epoch {epoch} mask strategy: {args.mask_mode[mask_strategy]}")
+    #         train_stats = train_one_epoch(
+    #             model, train_dataset,
+    #             optimizer, device, epoch, loss_scaler,
+    #             log_writer=log_writer,
+    #             args=args,
+    #             mask_mode=args.mask_mode[mask_strategy]
+    #         )
+    #         # torch.distributed.barrier()
+    #         if args.output_dir and (epoch % 5 == 0 or epoch + 1 == args.epochs) and misc.is_main_process():
+    #             misc.save_model(
+    #                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+    #                 loss_scaler=loss_scaler, epoch=epoch)
 
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                            'epoch': epoch,}
+    #         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+    #                         'epoch': epoch,}
 
-            if args.output_dir and misc.is_main_process():
-                if log_writer is not None:
-                    log_writer.flush()
-                with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                    f.write(json.dumps(log_stats) + "\n")
+    #         if args.output_dir and misc.is_main_process():
+    #             if log_writer is not None:
+    #                 log_writer.flush()
+    #             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+    #                 f.write(json.dumps(log_stats) + "\n")
                     
-            if args.do_eval:
-                test_stats = evaluate(
-                    model, 
-                    val_dataset, 
-                    device, 
-                    epoch, 
-                    log_writer=log_writer,
-                    args=args,
-                    mask_mode=args.mask_mode[mask_strategy]
-                ) 
-                log_stats = {**{f'train_{k}': v for k, v in test_stats.items()},
-                            'epoch': epoch,}
+    #         if args.do_eval:
+    #             test_stats = evaluate(
+    #                 model, 
+    #                 val_dataset, 
+    #                 device, 
+    #                 epoch, 
+    #                 log_writer=log_writer,
+    #                 args=args,
+    #                 mask_mode=args.mask_mode[mask_strategy]
+    #             ) 
+    #             log_stats = {**{f'train_{k}': v for k, v in test_stats.items()},
+    #                         'epoch': epoch,}
 
-        total_time = time.time() - start_time
-        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('Training time {}'.format(total_time_str))
+    #     total_time = time.time() - start_time
+    #     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    #     print('Training time {}'.format(total_time_str))
         
         
 if __name__ == '__main__':
     import wandb
 
-    os.system("wandb login --relogin 138c38699b36fb0223ca0f94cde30c6d531895ca")
-    wandb.init(project="mae_training", sync_tensorboard=True)
+    
     args = get_args_parser()
     args = args.parse_args()
     if args.output_dir:
