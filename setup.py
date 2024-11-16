@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name='mae',
     # version='0.1',
-    packages=find_packages(include=['mae', 'mae.*']),
+    packages=find_packages(where='.'),
     install_requires=[
         # Add your dependencies here
     ],
