@@ -106,6 +106,17 @@ def get_args_parser():
     
     return parser
 
+def attem_load_model(model, checkpoint_path):
+    # weights = torch.load(checkpoint_path)['state_dict']
+    weights = torch.load(checkpoint_path, map_location='cpu')
+    reweights = dict()
+    for k, v in weights['state_dict'].items():
+        reweights[k.split("model.")[1]] = v
+    model.load_state_dict(reweights)
+    model.eval()
+    
+    return model
+
 def main(args):
     
     # check dis mask is valid
@@ -159,7 +170,7 @@ def main(args):
     model = getattr(models_mae, args.model)(
         mask_ratio=args.mask_ratio,
         interpolate_ratio=args.interpolate_ratio,
-        mask_mode=args.mask_mode
+        mask_mode=args.mask_mode[0]
     )
     
     # Update config
@@ -168,8 +179,13 @@ def main(args):
     print("args.weights: ", args.weights)
     if os.path.isfile(args.weights):
         # load model
-        checkpoint = torch.load(args.weights, map_location='cpu')
-        msg = model.load_state_dict(checkpoint['model'], strict=False)
+        if args.weights.endswith('.pth'):
+            checkpoint = torch.load(args.weights, map_location='cpu')
+            msg = model.load_state_dict(checkpoint['model'], strict=False)
+        elif args.weights.endswith('.ckpt'):
+            msg = model = attem_load_model(model, args.weights)
+            model.mask_mode = args.mask_mode[0]
+            model.mask_ratio = args.mask_ratio
         print(f"\n\nLoad model from: {args.weights} {msg} \n\n")
     else:
         print("\n\nTraining from scratch . . . \n\n")
